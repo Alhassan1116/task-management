@@ -1,0 +1,1396 @@
+================================================================
+     TASK MANAGEMENT SYSTEM - FULL CODE EXPLANATION
+================================================================
+
+This document explains every file in the project, every function,
+every line of important code, and every technical term used.
+Written in plain language so anyone can understand it.
+
+
+================================================================
+SECTION 1 - PROJECT OVERVIEW
+================================================================
+
+The application has three layers that work together:
+
+  FRONTEND (what the user sees)
+    The browser loads an HTML page. JavaScript running in the
+    browser sends requests to the backend API to load, create,
+    update, and delete tasks. The results are displayed on the
+    page without reloading.
+
+  BACKEND (the server)
+    A Python program using the Flask framework receives the
+    requests from the browser, performs the requested operation
+    on the database, and sends back a response in JSON format.
+
+  DATABASE (data storage)
+    SQLite stores all task data in a single file on the server.
+    SQLAlchemy is used as the layer between Python and SQLite,
+    so the code never writes raw SQL - it uses Python objects
+    instead.
+
+How a typical request flows through the system:
+
+  1. User clicks "Add Task" in the browser
+  2. JavaScript collects the form data and sends a POST request
+     to http://16.171.8.141/api/tasks
+  3. Flask receives the request and runs the create_task function
+  4. create_task validates the data, creates a Task object,
+     and saves it to the SQLite database
+  5. Flask sends back the new task as JSON
+  6. JavaScript receives the JSON, adds the new task card to
+     the page without reloading
+
+
+================================================================
+SECTION 2 - FILE: models.py
+================================================================
+
+PURPOSE: Defines the structure of the database table and the
+Task object used throughout the application.
+
+Full file explanation line by line:
+
+  from datetime import datetime
+
+    Imports Python's built-in datetime class so we can record
+    the exact time when a task is created.
+
+  from flask_sqlalchemy import SQLAlchemy
+
+    Imports SQLAlchemy, which is the ORM (Object Relational
+    Mapper) used in this project. An ORM lets you work with
+    database tables as Python classes. Instead of writing
+    SQL like "INSERT INTO tasks VALUES (...)", you write
+    Python like "db.session.add(task)".
+
+  db = SQLAlchemy()
+
+    Creates the database engine object. It is created here
+    but not connected to Flask yet. The connection happens in
+    app.py when db.init_app(app) is called. This separation
+    prevents circular imports (where file A imports from file B
+    and file B imports from file A at the same time).
+
+  VALID_STATUSES = {"pending", "in-progress", "completed"}
+
+    A Python set (a collection of unique values) containing
+    the only three values allowed for a task's status field.
+    This is used in routes.py to validate incoming data before
+    saving it to the database. If someone sends "done" as a
+    status, it will be rejected because "done" is not in this set.
+
+  class Task(db.Model):
+
+    Defines a Python class called Task. By inheriting from
+    db.Model, SQLAlchemy knows this class represents a database
+    table. Every instance of this class (every Task object)
+    represents one row in the table.
+
+  __tablename__ = "tasks"
+
+    Tells SQLAlchemy the name of the database table. Without
+    this, SQLAlchemy would use the class name in lowercase
+    ("task") by default.
+
+  id = db.Column(db.Integer, primary_key=True)
+
+    Defines the "id" column in the database.
+    - db.Integer means the value is a whole number
+    - primary_key=True means this column uniquely identifies
+      each row. SQLite automatically increments this number
+      for each new task (1, 2, 3, 4...).
+
+  title = db.Column(db.String(200), nullable=False)
+
+    Defines the "title" column.
+    - db.String(200) means text up to 200 characters
+    - nullable=False means this column MUST have a value.
+      The database will reject any row without a title.
+
+  description = db.Column(db.Text, default="")
+
+    Defines the "description" column.
+    - db.Text is for longer text with no character limit
+    - default="" means if no description is provided, an
+      empty string is stored instead of NULL
+
+  status = db.Column(db.String(20), default="pending", nullable=False)
+
+    Defines the "status" column.
+    - db.String(20) means text up to 20 characters
+    - default="pending" means new tasks are automatically
+      set to "pending" status if not specified
+    - nullable=False means every task must have a status
+
+  due_date = db.Column(db.String(10), nullable=True)
+
+    Defines the "due_date" column.
+    - Stored as a string in YYYY-MM-DD format (e.g. "2026-05-15")
+    - nullable=True means this field is optional. A task
+      can exist without a due date.
+
+  created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    Defines the "created_at" column.
+    - db.DateTime stores a date and time value
+    - default=datetime.utcnow means when a new task is created,
+      this is automatically set to the current UTC time. Notice
+      there are no parentheses after utcnow - this passes the
+      function itself, not the result, so SQLAlchemy calls it
+      at the moment of creation.
+
+  def to_dict(self):
+      return { "id": self.id, "title": self.title, ... }
+
+    A method (function inside a class) that converts a Task
+    object into a plain Python dictionary. This is necessary
+    because Flask's jsonify() function, which converts data
+    to JSON format, cannot work with SQLAlchemy objects
+    directly. It needs a plain dictionary.
+
+    When called on a task, it returns something like:
+    {
+        "id": 1,
+        "title": "Finish report",
+        "description": "Write the project report",
+        "status": "in-progress",
+        "due_date": "2026-05-15",
+        "created_at": "2026-05-06T10:30:00"
+    }
+
+
+================================================================
+SECTION 3 - FILE: app.py
+================================================================
+
+PURPOSE: The main entry point of the application. Creates and
+configures the Flask app, sets up logging, registers routes,
+and initializes the database.
+
+  import logging
+
+    Imports Python's built-in logging module. Used to print
+    structured log messages to the terminal with timestamps
+    and severity levels (INFO, WARNING, ERROR).
+
+  import os
+
+    Imports the operating system module. Used to read
+    environment variables (like DATABASE_URL) and create
+    directories.
+
+  import time
+
+    Imports the time module. Used to measure how long each
+    HTTP request takes to process.
+
+  from flask import Flask, g, request
+
+    - Flask: the main class used to create the web application
+    - g: a special Flask object that stores data for the
+      duration of a single request. It is reset for every
+      new request. Used here to store the request start time.
+    - request: gives access to information about the current
+      HTTP request (method, path, body, headers, etc.)
+
+  def create_app():
+
+    This function creates and configures the Flask application.
+    Wrapping the app creation in a function is called the
+    "Application Factory Pattern". It makes the app easier
+    to test and to configure differently for development
+    vs production environments.
+
+  app = Flask(__name__)
+
+    Creates the Flask application object.
+    __name__ is a Python built-in variable containing the
+    name of the current module. Flask uses it to locate
+    template files and static files.
+
+  database_url = os.getenv("DATABASE_URL", "sqlite:///tasks.db")
+
+    Reads the DATABASE_URL environment variable. If it is
+    not set, defaults to "sqlite:///tasks.db" which creates
+    a SQLite file called tasks.db in the current directory.
+    Environment variables allow the same code to use different
+    database configurations without changing the source code.
+
+  if database_url.startswith("sqlite:////"):
+      db_path = database_url[len("sqlite:///"):]
+      os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    When running inside Docker, the DATABASE_URL is set to
+    "sqlite:////app/instance/tasks.db" (absolute path).
+    This code extracts the file path (/app/instance/tasks.db)
+    and creates the /app/instance/ directory if it does not
+    exist. Without this, the app would crash because SQLite
+    cannot create a file in a directory that does not exist.
+    exist_ok=True means no error is raised if the directory
+    already exists.
+
+  app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+
+    Stores the database connection string in Flask's
+    configuration dictionary. SQLAlchemy reads this to know
+    which database to connect to.
+
+  app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    Disables a SQLAlchemy feature that tracks every change to
+    database objects. It is disabled because it uses extra
+    memory and is not needed for this project.
+
+  db.init_app(app)
+
+    Connects the SQLAlchemy database object (created in
+    models.py) to the Flask application. After this call,
+    SQLAlchemy knows which Flask app it belongs to.
+
+  logging.basicConfig(
+      level=logging.INFO,
+      format="%(asctime)s %(levelname)s %(message)s",
+      datefmt="%Y-%m-%dT%H:%M:%S",
+  )
+
+    Configures the logging system:
+    - level=INFO means messages of level INFO and above
+      (INFO, WARNING, ERROR, CRITICAL) will be printed.
+      DEBUG messages will be ignored.
+    - format defines how each log line looks:
+      asctime = timestamp, levelname = INFO/WARNING/ERROR,
+      message = the actual log text
+    - datefmt defines the timestamp format (ISO 8601)
+
+  @app.before_request
+  def _start_timer():
+      g.start = time.time()
+
+    @app.before_request is a decorator that tells Flask to
+    run this function BEFORE every HTTP request is processed.
+    time.time() returns the current time as a floating point
+    number (seconds since January 1, 1970). This value is
+    stored in g.start so it can be accessed in the
+    after_request hook.
+
+  @app.after_request
+  def _log_request(response):
+      duration_ms = round((time.time() - g.start) * 1000)
+      logger.info("%s %s %s %dms",
+          request.method, request.path,
+          response.status_code, duration_ms)
+      return response
+
+    @app.after_request is a decorator that tells Flask to
+    run this function AFTER every request is processed,
+    just before the response is sent to the client.
+    - time.time() - g.start calculates how many seconds
+      the request took
+    - Multiplying by 1000 converts seconds to milliseconds
+    - round() removes unnecessary decimal places
+    - logger.info() prints the log line, for example:
+      "2026-05-06T10:30:00 INFO GET /api/tasks 200 2ms"
+    - The function must return the response object or
+      Flask will not send it to the client
+
+  from routes import tasks_bp
+  app.register_blueprint(tasks_bp)
+
+    Imports the Blueprint (collection of routes) from
+    routes.py and registers it with the Flask app. The import
+    is done inside the function (not at the top of the file)
+    to avoid circular imports. routes.py imports from models.py,
+    which is already imported at module level in app.py.
+
+  with app.app_context():
+      db.create_all()
+
+    app_context() creates Flask's internal environment needed
+    for database operations. db.create_all() looks at all
+    classes that inherit from db.Model and creates the
+    corresponding database tables if they do not already exist.
+    If the tables exist, nothing happens. This runs every time
+    the app starts.
+
+  if __name__ == "__main__":
+      port = int(os.getenv("FLASK_PORT", 5000))
+      flask_env = os.getenv("FLASK_ENV", "production")
+      app = create_app()
+      app.run(host="0.0.0.0", port=port, debug=(flask_env == "development"))
+
+    This block runs ONLY when app.py is executed directly
+    with "python app.py". It does NOT run when the file is
+    imported by another module.
+    - host="0.0.0.0" tells Flask to accept connections from
+      any network interface, not just localhost. Required for
+      Docker to forward external requests to the container.
+    - debug=True only when FLASK_ENV is "development". Debug
+      mode enables automatic reload when code changes and
+      shows detailed error pages in the browser.
+
+
+================================================================
+SECTION 4 - FILE: routes.py
+================================================================
+
+PURPOSE: Contains all the URL endpoints (routes) of the API.
+Each function handles one specific HTTP request.
+
+  tasks_bp = Blueprint("tasks", __name__)
+
+    Creates a Flask Blueprint named "tasks". A Blueprint is
+    a way to organize routes into a separate module. It is
+    registered with the main Flask app in app.py using
+    app.register_blueprint(tasks_bp). This keeps the code
+    organized and avoids putting everything in one file.
+
+  logger = logging.getLogger(__name__)
+
+    Creates a logger for this module. Log messages from
+    routes.py will be tagged with the module name, making
+    it easy to identify where log messages come from.
+
+
+  ROUTE: GET /
+  ------------
+  @tasks_bp.route("/")
+  def index():
+      return render_template("index.html")
+
+    When a user visits the root URL ("/") in their browser,
+    Flask renders the index.html template and sends it to
+    the browser. render_template() finds the file in the
+    templates/ folder, processes it, and returns the HTML.
+    This is the only route that returns an HTML page.
+    All other routes return JSON for the API.
+
+
+  ROUTE: GET /api/tasks
+  ----------------------
+  def list_tasks():
+      tasks = Task.query.order_by(Task.created_at.desc()).all()
+      return jsonify([t.to_dict() for t in tasks])
+
+    - Task.query starts a database query on the tasks table
+    - .order_by(Task.created_at.desc()) sorts results by
+      creation time, newest first (.desc() = descending)
+    - .all() executes the query and returns a Python list
+      of Task objects
+    - [t.to_dict() for t in tasks] is a list comprehension
+      that calls to_dict() on each Task object, creating
+      a list of dictionaries
+    - jsonify() converts the list of dictionaries to a
+      JSON string and sets the Content-Type header to
+      "application/json"
+
+    Returns: JSON array of all tasks, HTTP 200
+
+
+  ROUTE: GET /api/tasks/<id>
+  ---------------------------
+  def get_task(task_id):
+      task = db.session.get(Task, task_id)
+      if task is None:
+          return jsonify({"error": "Task not found"}), 404
+      return jsonify(task.to_dict())
+
+    - <int:task_id> in the route URL tells Flask to extract
+      the number from the URL and pass it as the task_id
+      parameter. For /api/tasks/5, task_id = 5.
+    - db.session.get(Task, task_id) looks up the task by
+      its primary key (id). Returns None if not found.
+    - If the task is None, returns a JSON error message
+      with HTTP status 404 (Not Found)
+    - If found, returns the task as JSON with HTTP 200
+
+    Returns: single task JSON, or 404 error
+
+
+  ROUTE: POST /api/tasks
+  -----------------------
+  def create_task():
+      data = request.get_json(silent=True)
+      if not data:
+          return jsonify({"error": "Request body must be JSON"}), 400
+
+    - request.get_json() parses the request body as JSON
+    - silent=True means it returns None instead of raising
+      an error if the body is not valid JSON
+    - If data is None or empty, returns 400 (Bad Request)
+
+      title = (data.get("title") or "").strip()
+      if not title:
+          return jsonify({"error": "'title' is required"}), 400
+
+    - data.get("title") gets the title value, or None if
+      the key does not exist in the JSON
+    - (... or "") replaces None with an empty string
+    - .strip() removes leading and trailing whitespace
+    - If the result is an empty string, returns 400
+
+      status = data.get("status", "pending")
+      if status not in VALID_STATUSES:
+          return jsonify({"error": "..."}), 400
+
+    - Gets the status value, defaulting to "pending"
+    - Checks if the status is in the VALID_STATUSES set
+    - If not valid, returns 400 with an error message
+
+      task = Task(title=title, description=..., status=status, due_date=...)
+      db.session.add(task)
+      db.session.commit()
+      return jsonify(task.to_dict()), 201
+
+    - Creates a new Task object with the validated data
+    - db.session.add(task) tells SQLAlchemy to track this
+      object (it has not been saved yet)
+    - db.session.commit() saves all pending changes to the
+      database (executes the INSERT SQL statement)
+    - Returns the created task as JSON with HTTP 201 (Created)
+    - If any exception occurs, db.session.rollback() undoes
+      all unsaved changes and returns HTTP 500
+
+
+  ROUTE: PUT /api/tasks/<id>
+  ---------------------------
+  def update_task(task_id):
+
+    - First looks up the task by ID, returns 404 if not found
+    - Reads the JSON request body
+    - Checks which fields are present in the request:
+      if "title" in data: task.title = ...
+      if "status" in data: task.status = ...
+      if "due_date" in data: task.due_date = ...
+    - Only updates fields that are included in the request.
+      If only {"status": "completed"} is sent, only the
+      status changes. The title and description stay the same.
+    - Validates each field the same way as create_task
+    - Calls db.session.commit() to save the changes
+    - Returns the updated task as JSON
+
+
+  ROUTE: DELETE /api/tasks/<id>
+  ------------------------------
+  def delete_task(task_id):
+      task = db.session.get(Task, task_id)
+      if task is None:
+          return jsonify({"error": "Task not found"}), 404
+      db.session.delete(task)
+      db.session.commit()
+      return jsonify({"message": "Task deleted"}), 200
+
+    - Looks up the task, returns 404 if not found
+    - db.session.delete(task) marks the object for deletion
+    - db.session.commit() executes the DELETE SQL statement
+    - Returns a confirmation message with HTTP 200
+
+
+  ERROR HANDLING PATTERN (used in all routes)
+  --------------------------------------------
+  try:
+      ... normal code ...
+  except Exception as exc:
+      db.session.rollback()
+      logger.error("...: %s", exc, exc_info=True)
+      return jsonify({"error": "Internal server error"}), 500
+
+    Every route is wrapped in a try/except block.
+    - try: contains the normal code that should run
+    - except Exception catches any unexpected error
+    - db.session.rollback() undoes any partial database
+      changes so the database stays in a consistent state
+    - logger.error(..., exc_info=True) logs the full error
+      including the stack trace (the chain of function calls
+      that led to the error) for debugging
+    - Returns HTTP 500 (Internal Server Error) with a clean
+      JSON error message instead of crashing or exposing
+      internal details to the user
+
+
+================================================================
+SECTION 5 - FILE: templates/index.html
+================================================================
+
+PURPOSE: The only HTML page in the application. Loaded once
+when the user visits the URL. JavaScript then updates the
+page content dynamically without reloading.
+
+Key sections explained:
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    Tells the browser to use the device's actual width for
+    layout. Without this, mobile browsers zoom out to fit
+    the desktop version of the page. This is required for
+    responsive design to work correctly.
+
+  <link rel="stylesheet" href="/static/css/style.css">
+
+    Loads the CSS stylesheet from Flask's static file server.
+    /static/ is a special URL path that Flask uses to serve
+    files from the static/ folder without any processing.
+
+  <form id="task-form">
+
+    The form used for both creating and editing tasks. It has
+    one hidden input (edit-id) that stores the ID of the task
+    being edited. When edit-id is empty, the form creates a
+    new task. When it has a value, the form updates that task.
+
+  <input type="hidden" id="edit-id" value="">
+
+    Hidden inputs are not visible to the user but their values
+    are accessible to JavaScript. This stores the ID of the
+    task currently being edited.
+
+  <section class="filter-bar">
+    <button data-status="all">All</button>
+    <button data-status="pending">Pending</button>
+    ...
+
+    Four buttons for filtering the task list. The data-status
+    attribute stores the filter value. JavaScript reads this
+    attribute when a button is clicked to know which filter
+    to apply. This is called a "data attribute" - a way to
+    store custom data on HTML elements.
+
+  <section id="task-list">
+
+    An empty container. JavaScript fills this with task card
+    HTML dynamically when the page loads and whenever the
+    task list changes.
+
+  <div class="modal-overlay" id="delete-modal" hidden>
+
+    A confirmation popup that appears when the user clicks
+    the Delete button on a task. The "hidden" attribute makes
+    it invisible by default. JavaScript removes this attribute
+    to show the modal and adds it back to hide it.
+
+  <script src="/static/js/app.js">
+
+    Loads the JavaScript file. It is placed at the bottom of
+    the HTML body so that all HTML elements are fully loaded
+    before the script tries to access them.
+
+
+================================================================
+SECTION 6 - FILE: static/css/style.css
+================================================================
+
+PURPOSE: Controls the visual appearance of the entire
+application. All colors, fonts, spacing, layout, and
+responsive behavior are defined here.
+
+Key concepts explained:
+
+  :root { --color-primary: #4f46e5; ... }
+
+    CSS Custom Properties (also called CSS Variables). Values
+    defined here with double dashes (--) can be reused
+    throughout the file using var(--color-primary). Changing
+    one variable here updates the color everywhere it is used.
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    The universal selector (*) applies these rules to every
+    element on the page.
+    - box-sizing: border-box means padding and borders are
+      included in the element's width/height, making layout
+      calculations more predictable.
+    - margin: 0 and padding: 0 removes browser default
+      spacing that varies between browsers.
+
+  .container { max-width: 860px; margin: 0 auto; }
+
+    Centers the main content on the page. max-width prevents
+    the content from becoming too wide on large screens.
+    margin: 0 auto sets left and right margins automatically
+    to center the element horizontally.
+
+  .form-row { display: grid; grid-template-columns: 1fr auto auto; }
+
+    CSS Grid layout. The form row has three columns:
+    - 1fr means the title input takes all available space
+    - auto means the status and date inputs take only as
+      much space as their content needs
+
+  @media (max-width: 580px) { .form-row { grid-template-columns: 1fr; } }
+
+    A media query. When the screen is 580 pixels wide or less
+    (mobile devices), the three-column layout switches to a
+    single column layout so everything stacks vertically.
+
+  .badge-pending { background: #e2e8f0; color: #475569; }
+  .badge-in-progress { background: #dbeafe; color: #1d4ed8; }
+  .badge-completed { background: #dcfce7; color: #15803d; }
+
+    Three badge styles for task status:
+    - pending: light gray background, dark gray text
+    - in-progress: light blue background, dark blue text
+    - completed: light green background, dark green text
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); }
+
+    The delete confirmation modal overlay.
+    - position: fixed means it stays in place even when the
+      page is scrolled
+    - inset: 0 is shorthand for top:0, right:0, bottom:0,
+      left:0 - covers the entire screen
+    - rgba(0,0,0,.45) is black at 45% opacity, creating the
+      dark semi-transparent background behind the modal
+
+
+================================================================
+SECTION 7 - FILE: static/js/app.js
+================================================================
+
+PURPOSE: All frontend logic. Handles user interactions,
+communicates with the Flask API, and updates the page.
+Written in vanilla JavaScript (no libraries or frameworks).
+
+State Variables
+---------------
+  let tasks = [];
+  let activeFilter = 'all';
+  let pendingDeleteId = null;
+
+    These three variables hold the entire state of the UI.
+    - tasks: array of all task objects loaded from the API
+    - activeFilter: which filter button is selected
+    - pendingDeleteId: ID of the task the user wants to delete
+
+    When any of these change, render() is called to update
+    what is shown on the screen.
+
+DOM References
+--------------
+  const taskForm = document.getElementById('task-form');
+  const titleInput = document.getElementById('title');
+  ...
+
+    document.getElementById() finds an HTML element by its
+    id attribute and returns a reference to it. These
+    references are stored in variables at the top of the file
+    so they don't need to be looked up repeatedly.
+
+Function: apiFetch(url, options)
+---------------------------------
+  async function apiFetch(url, options = {}) {
+      const res = await fetch(url, {
+          headers: { 'Content-Type': 'application/json' },
+          ...options,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      return body;
+  }
+
+    A reusable wrapper around the browser's fetch() function.
+    All API calls in the application go through this function.
+
+    async/await: JavaScript is asynchronous - it does not
+    stop and wait for network requests. async marks this
+    function as asynchronous. await pauses execution until
+    the fetch completes, then continues with the result.
+
+    fetch(url, options): sends an HTTP request to the server
+    and returns a Promise (a placeholder for a future value).
+
+    headers: { 'Content-Type': 'application/json' }:
+    tells the server that the request body is JSON so Flask
+    knows to parse it with request.get_json().
+
+    ...options: the spread operator copies all properties
+    from the options object into the fetch options. This
+    allows callers to pass method, body, etc.
+
+    res.ok: true if the HTTP status code is 200-299,
+    false for 4xx and 5xx errors.
+
+    throw new Error(): if the response is an error, throws
+    a JavaScript exception that is caught by the calling
+    function's try/catch block.
+
+Function: loadTasks()
+----------------------
+  async function loadTasks() {
+      tasks = await apiFetch('/api/tasks');
+      render();
+  }
+
+    Called once when the page first loads. Fetches all tasks
+    from GET /api/tasks, stores them in the tasks array,
+    then calls render() to display them.
+
+Function: filteredTasks()
+--------------------------
+  function filteredTasks() {
+      if (activeFilter === 'all') return tasks;
+      return tasks.filter(t => t.status === activeFilter);
+  }
+
+    Returns the subset of tasks to display based on the
+    active filter. tasks.filter() creates a new array
+    containing only the tasks where the status matches
+    the activeFilter. No API call is made - filtering
+    happens entirely in the browser using the tasks array.
+
+Function: render()
+-------------------
+  function render() {
+      const visible = filteredTasks();
+      taskList.innerHTML = visible.map(taskCard).join('');
+      ...attach event listeners...
+  }
+
+    Rebuilds the entire task list in the browser.
+    - visible.map(taskCard) calls the taskCard function on
+      every task and returns an array of HTML strings
+    - .join('') combines the array into one big string
+    - taskList.innerHTML = ... sets the inner HTML of the
+      task list container to the generated HTML string
+
+    After setting innerHTML, event listeners are attached
+    to the new Edit and Delete buttons using querySelectorAll
+    and addEventListener.
+
+Function: taskCard(task)
+-------------------------
+  function taskCard(task) {
+      return `<div class="task-card ${...}">...</div>`;
+  }
+
+    A pure function (no side effects) that takes one task
+    object and returns an HTML string for one task card.
+    Uses template literals (backtick strings) for multi-line
+    strings with embedded expressions using ${}.
+
+    escHtml() is called on user-provided text (title,
+    description) before inserting into the HTML to prevent
+    XSS attacks (explained below).
+
+Form Submission Event
+---------------------
+  taskForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const id = editIdInput.value;
+      if (id) {
+          // update: PUT /api/tasks/:id
+      } else {
+          // create: POST /api/tasks
+      }
+  });
+
+    addEventListener('submit', ...) runs the function when
+    the form is submitted (when the user clicks the button
+    or presses Enter).
+
+    e.preventDefault() stops the browser's default form
+    submission behavior (which would reload the page with
+    form data in the URL). Instead, the data is sent via
+    fetch() to the API.
+
+    The same form is used for creating and editing. The
+    edit-id hidden input determines which operation to perform.
+
+Function: startEdit(id)
+------------------------
+  function startEdit(id) {
+      const task = tasks.find(t => t.id === id);
+      titleInput.value = task.title;
+      statusInput.value = task.status;
+      editIdInput.value = task.id;
+      formTitle.textContent = 'Edit Task';
+      submitBtn.textContent = 'Save Changes';
+      cancelBtn.hidden = false;
+  }
+
+    Called when the user clicks the Edit button on a task.
+    tasks.find() searches the tasks array for the task with
+    the matching id. The form is pre-filled with the task's
+    current values. The form title and button text are updated
+    to make it clear the user is editing, not creating.
+
+Delete Modal Functions
+-----------------------
+  function openDeleteModal(id) {
+      pendingDeleteId = id;
+      deleteModal.hidden = false;
+  }
+
+    Stores the ID of the task to be deleted and shows the
+    confirmation modal by removing the "hidden" attribute.
+
+  confirmDelBtn.addEventListener('click', async () => {
+      await apiFetch(`/api/tasks/${pendingDeleteId}`, { method: 'DELETE' });
+      tasks = tasks.filter(t => t.id !== pendingDeleteId);
+      render();
+  });
+
+    When the user confirms deletion:
+    - Calls DELETE /api/tasks/:id on the server
+    - Removes the deleted task from the local tasks array
+      using tasks.filter() (keeps all tasks EXCEPT the
+      deleted one)
+    - Calls render() to update the display
+    - No new GET /api/tasks call is needed because the
+      local tasks array is already updated
+
+Function: escHtml(str) - SECURITY FUNCTION
+-------------------------------------------
+  function escHtml(str) {
+      return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+  }
+
+    This function prevents Cross-Site Scripting (XSS) attacks.
+
+    XSS is a security vulnerability where an attacker enters
+    malicious JavaScript code as a task title, like:
+      <script>alert('hacked')</script>
+
+    If this were inserted directly into innerHTML, the browser
+    would execute the script. escHtml() converts the special
+    characters to their HTML entity equivalents:
+      < becomes &lt; (displays as < but not executed as HTML)
+      > becomes &gt;
+      & becomes &amp;
+      " becomes &quot;
+
+    So the malicious script becomes:
+      &lt;script&gt;alert('hacked')&lt;/script&gt;
+    Which displays as visible text instead of executing.
+
+
+================================================================
+SECTION 8 - FILE: requirements.txt
+================================================================
+
+PURPOSE: Lists all Python packages needed to run the application.
+When pip install -r requirements.txt is run, pip (Python's
+package manager) downloads and installs all listed packages.
+
+  Flask==3.1.0
+
+    The web framework. Provides routing, request/response
+    handling, template rendering, and the development server.
+    The == means exactly this version is required, ensuring
+    consistent behavior across all environments.
+
+  Flask-SQLAlchemy==3.1.1
+
+    The Flask extension that integrates SQLAlchemy with Flask.
+    Handles the connection lifecycle (opening and closing
+    database connections per request) and provides db.init_app().
+
+  SQLAlchemy==2.0.36
+
+    The ORM itself. Translates Python class operations into
+    SQL queries and database calls.
+
+  Werkzeug==3.1.3
+
+    Flask's underlying HTTP library. Handles parsing HTTP
+    requests and building HTTP responses. Flask depends on it
+    but it is pinned explicitly for version stability.
+
+  gunicorn==23.0.0
+
+    A production-grade WSGI server. WSGI (Web Server Gateway
+    Interface) is the standard interface between Python web
+    applications and web servers. Flask's built-in server is
+    only for development. Gunicorn is available in the image
+    if a switch to production mode is needed.
+
+
+================================================================
+SECTION 9 - FILE: Dockerfile
+================================================================
+
+PURPOSE: A text file containing step-by-step instructions
+for building a Docker image of the application.
+
+A Docker image is like a snapshot of the application and
+everything it needs to run (Python, packages, code) packaged
+into a single portable file. A container is a running
+instance of that image.
+
+  FROM python:3.11-slim
+
+    Every Dockerfile starts with a base image. python:3.11-slim
+    is an official image from Docker Hub that contains Python
+    3.11 installed on a minimal version of Debian Linux.
+    "slim" means unnecessary tools (compilers, documentation,
+    etc.) are excluded to keep the image size small.
+
+  WORKDIR /app
+
+    Sets the working directory inside the container to /app.
+    All subsequent commands (COPY, RUN, CMD) execute from
+    this directory. If /app does not exist, Docker creates it.
+
+  COPY requirements.txt .
+
+    Copies only requirements.txt from the local machine into
+    the container's /app directory. The dot (.) means the
+    current WORKDIR (/app).
+
+    This is done BEFORE copying the rest of the code as a
+    Docker layer caching optimization. Docker builds images
+    in layers, one per instruction. If a layer has not changed,
+    Docker reuses the cached layer and skips the step.
+    Since requirements.txt changes less often than source code,
+    this means "pip install" only runs when dependencies change,
+    not every time any code file is changed.
+
+  RUN pip install --no-cache-dir -r requirements.txt
+
+    Installs all Python packages listed in requirements.txt
+    inside the container.
+    --no-cache-dir tells pip not to save downloaded packages
+    to disk cache, keeping the image size smaller.
+
+  COPY . .
+
+    Copies all remaining project files from the local machine
+    into the container's /app directory.
+    Files listed in .dockerignore are excluded.
+
+  EXPOSE 5000
+
+    Documents that the container's application listens on
+    port 5000. This is informational only - it does not
+    actually open the port. The actual port mapping is
+    configured in docker-compose.yml with the "ports" setting.
+
+  CMD ["python", "app.py"]
+
+    The default command to run when a container starts.
+    Written as a JSON array (called exec form) to avoid
+    running through a shell, which ensures signals like
+    CTRL+C are passed directly to the Python process.
+
+
+================================================================
+SECTION 10 - FILE: docker-compose.yml
+================================================================
+
+PURPOSE: Defines how to run the application using Docker
+Compose. Even with only one container, Compose simplifies
+configuration by keeping all settings in one file.
+
+  version: "3.9"
+
+    Specifies the Docker Compose file format version.
+    This line is now considered obsolete but still accepted.
+
+  services:
+
+    Defines all containers to run. Each entry under services
+    is one container.
+
+  app:
+    build: .
+
+    Defines a service called "app" and tells Compose to build
+    the Docker image from the Dockerfile in the current
+    directory (dot = current directory).
+
+  ports:
+    - "80:5000"
+
+    Port mapping: "HOST_PORT:CONTAINER_PORT"
+    Port 80 on the EC2 server maps to port 5000 inside the
+    container. When a browser sends a request to port 80,
+    Docker intercepts it and forwards it to Flask on port 5000.
+    Port 80 is the default HTTP port, so no port number is
+    needed in the URL.
+
+  env_file:
+    - .env
+
+    Loads all KEY=VALUE pairs from the .env file and sets them
+    as environment variables inside the container. The
+    application reads these with os.getenv(). This keeps
+    configuration and secrets out of the source code.
+
+  volumes:
+    - db-data:/app/instance
+
+    Mounts a named volume called "db-data" at the path
+    /app/instance inside the container. This is where the
+    SQLite database file is stored.
+
+    WHY THIS MATTERS: Container filesystems are temporary.
+    When a container is stopped and recreated (with
+    "docker compose up --build"), the container filesystem
+    is wiped. Without a volume, all task data would be lost
+    every time the app is restarted. The volume is stored
+    on the host machine (the EC2 server) separately from
+    the container, so data persists.
+
+  restart: unless-stopped
+
+    Container restart policy. Docker automatically restarts
+    the container if:
+    - The application crashes
+    - The EC2 server is rebooted
+    It does NOT restart if manually stopped with
+    "docker compose down".
+
+  volumes:
+    db-data:
+
+    Declares the named volume "db-data" at the top level.
+    Docker creates and manages this volume. Without this
+    declaration, the volume reference inside the service
+    would cause an error.
+
+
+================================================================
+SECTION 11 - FILE: .env
+================================================================
+
+PURPOSE: Stores configuration values as environment variables.
+Loaded into the container by docker-compose.yml.
+
+  FLASK_PORT=5000
+
+    The port number Flask listens on inside the container.
+    Read in app.py with os.getenv("FLASK_PORT", 5000).
+
+  FLASK_ENV=development
+
+    Controls Flask's operating mode. When set to "development",
+    debug mode is enabled which shows detailed error pages
+    and reloads the server automatically when code changes.
+    For a production app this should be "production".
+
+  DATABASE_URL=sqlite:////app/instance/tasks.db
+
+    The SQLAlchemy connection string for the database.
+    Format: dialect:///path
+    - sqlite: the database type
+    - //// four slashes because three slashes is the
+      SQLAlchemy prefix and one slash starts the absolute
+      path, making the full path /app/instance/tasks.db
+    The database file is inside the Docker volume so it
+    persists across container restarts.
+
+
+================================================================
+SECTION 12 - FILE: .dockerignore
+================================================================
+
+PURPOSE: Lists files and folders to exclude when Docker
+copies the project into the image (the COPY . . command in
+the Dockerfile). Similar to .gitignore for Git.
+
+  __pycache__/   - Python's bytecode cache folders (auto-generated)
+  *.py[cod]      - Compiled Python files (.pyc, .pyo, .pyd)
+  *.db           - Local SQLite database files
+  .env           - Environment variables file (secrets)
+  instance/      - Local Flask instance folder
+  .git/          - Git history and metadata
+
+  WHY EXCLUDE .env:
+    The .env file may contain passwords or secret keys.
+    Excluding it from the image prevents secrets from being
+    baked into the Docker image. The .env file is loaded
+    at runtime by docker-compose.yml instead.
+
+  WHY EXCLUDE *.db:
+    Prevents a local database from being copied into the
+    image, which could overwrite the database in the volume.
+
+  WHY EXCLUDE __pycache__:
+    These folders contain compiled Python bytecode generated
+    on the local machine. Including them could cause errors
+    if the local OS differs from the container OS (Linux).
+
+
+================================================================
+SECTION 13 - DOCKER CONCEPTS EXPLAINED
+================================================================
+
+What is Docker?
+---------------
+Docker is a tool that packages an application and everything
+it needs to run (operating system dependencies, Python version,
+packages, configuration) into a single portable unit called
+a container. A container runs the same way on any machine
+that has Docker installed, regardless of the host OS.
+
+Without Docker, deploying a Python app requires:
+  - Installing the correct Python version on the server
+  - Installing all packages manually
+  - Configuring environment variables
+  - Dealing with differences between local and server OS
+
+With Docker, the Dockerfile defines everything once and the
+container runs identically everywhere.
+
+Docker Image vs Docker Container
+---------------------------------
+  Image: A read-only template. Like a class in programming.
+         Built from a Dockerfile. Stored on disk.
+
+  Container: A running instance of an image. Like an object
+             created from a class. Has its own isolated
+             filesystem, process space, and network.
+
+  Multiple containers can be started from the same image.
+
+Docker Volume
+--------------
+A volume is a directory managed by Docker that exists outside
+the container's filesystem. Data written to a volume persists
+even when the container is stopped, recreated, or deleted.
+
+Without a volume: data lives inside the container filesystem
+and is lost when the container is recreated.
+
+With a volume: data lives in Docker-managed storage on the
+host machine and is mounted into the container at a specified
+path. The container sees it as a normal directory.
+
+Docker Hub
+-----------
+A public registry (like GitHub but for Docker images) where
+official and community images are hosted. When the Dockerfile
+says "FROM python:3.11-slim", Docker downloads this image
+from Docker Hub automatically during the build.
+
+Docker Compose
+---------------
+A tool that manages multiple Docker containers defined in a
+single YAML file (docker-compose.yml). Even with one container
+it is useful because it:
+- Handles port mapping
+- Loads environment variables from .env
+- Creates and mounts volumes
+- Sets restart policies
+- Allows starting everything with one command
+
+
+================================================================
+SECTION 14 - EC2 AND AWS CONCEPTS EXPLAINED
+================================================================
+
+Virtual Machine (VM)
+---------------------
+A software-based computer that runs inside a physical computer.
+EC2 provides virtual machines in Amazon's data centers. You
+get a machine that behaves exactly like a physical server but
+is actually software running on Amazon's hardware.
+
+Instance
+---------
+The term AWS uses for a virtual machine. "Launching an instance"
+means creating and starting a new virtual machine.
+
+t2.micro
+---------
+The size specification for the EC2 instance.
+  t = general purpose family
+  2 = second generation
+  micro = extra small size (1 vCPU, 1 GB RAM)
+It is the smallest instance type available and is included in
+the AWS Free Tier.
+
+AMI (Amazon Machine Image)
+---------------------------
+A pre-configured snapshot of an operating system used to launch
+an EC2 instance. Ubuntu 24.04 LTS was chosen because:
+  - It is a stable, widely used Linux distribution
+  - Docker installation is well documented for Ubuntu
+  - LTS (Long Term Support) means security updates until 2029
+
+SSH (Secure Shell)
+-------------------
+A protocol for securely connecting to a remote server over
+the internet. SSH encrypts all communication between the local
+machine and the server. Once connected, commands typed in
+the local terminal are executed on the remote server.
+
+RSA Key Pair
+-------------
+RSA is a cryptographic algorithm used for authentication.
+A key pair consists of two mathematically linked keys:
+  Public key: stored on the EC2 server (added automatically
+              by AWS when the instance is created)
+  Private key: stored in the .pem file on your computer
+
+When you connect via SSH, your SSH client uses the private key
+to prove your identity. The server verifies it using the public
+key. If they match, access is granted without a password.
+
+PEM File
+---------
+Privacy Enhanced Mail format. A file format for storing
+cryptographic keys. The .pem file downloaded from AWS contains
+the RSA private key in base64-encoded text format. It must be
+kept secret - anyone with this file can access the server.
+
+Security Group
+---------------
+AWS's virtual firewall. Controls inbound (incoming) and
+outbound (outgoing) network traffic to an EC2 instance using
+rules that specify:
+  - Protocol (TCP, UDP, etc.)
+  - Port range
+  - Source IP address
+
+Port
+-----
+A number (0-65535) that identifies a specific service or
+application on a server. When a browser connects to a server,
+it connects to a specific port. Common ports:
+  22  - SSH (remote terminal access)
+  80  - HTTP (unencrypted web traffic)
+  443 - HTTPS (encrypted web traffic)
+  5000 - Flask's default development port
+
+Port Mapping (80 -> 5000)
+--------------------------
+Flask runs on port 5000 inside the Docker container.
+The EC2 server's Security Group has port 80 open.
+Docker maps incoming traffic on port 80 (host) to port 5000
+(container). A browser request to http://16.171.8.141
+(which uses port 80 by default) reaches the Flask server.
+
+Public IP vs Private IP
+------------------------
+  Public IP (16.171.8.141): The internet-facing address.
+  Used in the URL to access the app from anywhere.
+
+  Private IP (172.31.40.218): The internal AWS network address.
+  Only used within AWS's internal network. This is why the
+  EC2 hostname shows ip-172-31-40-218 even though the public
+  IP is 16.171.8.141.
+
+SCP (Secure Copy Protocol)
+---------------------------
+A command-line tool for transferring files between computers
+over SSH. Uses the same authentication (key pair) as SSH.
+The -r flag means recursive, which copies entire directories.
+
+sudo
+-----
+"Super User Do" - runs a command with administrator (root)
+privileges on Linux. Required for installing software and
+modifying system configuration.
+
+apt
+----
+"Advanced Package Tool" - Ubuntu's package manager. Used to
+install, update, and remove software packages from Ubuntu's
+official repositories. Similar to pip for Python packages.
+
+Detached Mode (-d flag)
+------------------------
+When running "docker compose up -d", the -d flag runs the
+containers in the background. Without it, the terminal shows
+live logs and is occupied until CTRL+C is pressed. In detached
+mode, the terminal is immediately returned to the user and the
+containers continue running in the background.
+
+
+================================================================
+SECTION 15 - HTTP AND API CONCEPTS EXPLAINED
+================================================================
+
+HTTP Methods
+------------
+  GET    - Retrieve data. No body. Safe (does not change data).
+  POST   - Create a new resource. Has a request body.
+  PUT    - Update an existing resource. Has a request body.
+  DELETE - Delete a resource. No body.
+
+HTTP Status Codes
+-----------------
+  200 OK           - Request succeeded
+  201 Created      - New resource successfully created
+  400 Bad Request  - The client sent invalid or missing data
+  404 Not Found    - The requested resource does not exist
+  500 Internal Server Error - Something went wrong on the server
+
+REST API
+---------
+Representational State Transfer. An API design style where:
+  - Resources are identified by URLs (/api/tasks, /api/tasks/5)
+  - Operations are performed using HTTP methods (GET, POST, etc.)
+  - Data is exchanged in JSON format
+  - Each request is self-contained (stateless)
+
+JSON (JavaScript Object Notation)
+-----------------------------------
+A text format for exchanging data between systems.
+Example task in JSON:
+  {
+    "id": 1,
+    "title": "Finish report",
+    "status": "in-progress",
+    "due_date": "2026-05-15"
+  }
+JSON is language-independent but maps naturally to Python
+dictionaries and JavaScript objects.
+
+CRUD
+-----
+The four fundamental database operations:
+  Create - INSERT a new record (POST /api/tasks)
+  Read   - SELECT records (GET /api/tasks)
+  Update - UPDATE a record (PUT /api/tasks/1)
+  Delete - DELETE a record (DELETE /api/tasks/1)
+
+XSS (Cross-Site Scripting)
+----------------------------
+A security attack where an attacker injects malicious JavaScript
+into a web page by entering it as user input (e.g. a task title).
+If the JavaScript is inserted into the HTML without sanitization,
+the browser executes it. This can be used to steal cookies,
+redirect users, or deface the page.
+
+Prevention: escape special HTML characters before inserting
+user input into the HTML. The escHtml() function in app.js
+does this by converting < to &lt;, > to &gt;, etc.
+
+ORM (Object Relational Mapper)
+--------------------------------
+A layer of code that translates between object-oriented
+programming and relational databases. With SQLAlchemy:
+  - Python class = database table
+  - Python object = database row
+  - Python attribute = database column
+  - db.session.add(task) = INSERT INTO tasks ...
+  - Task.query.all() = SELECT * FROM tasks
+
+This means the developer writes Python code and never writes
+SQL directly. The ORM generates the SQL automatically.
+
+Blueprint (Flask)
+------------------
+A way to organize Flask routes into separate modules. Instead
+of defining all routes in app.py, routes are grouped in a
+Blueprint and registered with the app. This makes the code
+more organized and easier to maintain as the application grows.
+
+Environment Variable
+---------------------
+A named value stored in the operating system's environment.
+Programs can read these values at runtime using os.getenv().
+Used for configuration that changes between environments
+(development, testing, production) without changing the code.
+Examples: database URLs, API keys, port numbers, debug flags.
+
+
+================================================================
+                    END OF EXPLANATION
+================================================================

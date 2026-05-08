@@ -1,0 +1,348 @@
+================================================================
+        TASK MANAGEMENT SYSTEM - PROJECT REPORT
+================================================================
+
+
+----------------------------------------------------------------
+1. PROJECT IDEA AND OBJECTIVES
+----------------------------------------------------------------
+
+Project Idea
+------------
+The Task Management System is a web application that allows users
+to create, view, update, and delete tasks through a browser. The
+user fills out a form with a task title, description, status, and
+due date. The task is saved to a database and displayed in a list
+on the same page. The user can filter tasks by status, edit them,
+and delete them at any time.
+
+The application is fully containerized using Docker, meaning it
+can run on any machine without any manual setup. It is deployed
+on a cloud server provided by Amazon Web Services (AWS), making
+it accessible from anywhere in the world through a web browser.
+
+Objectives
+----------
+1. Build a working REST API backend using Python and Flask that
+   handles all task operations (create, read, update, delete).
+
+2. Store all task data persistently in a SQLite database so that
+   data is not lost when the server restarts.
+
+3. Create a clean, responsive web interface using HTML, CSS, and
+   JavaScript that communicates with the backend through API calls.
+
+4. Package the entire application into a Docker container so it
+   can be deployed consistently on any machine or server.
+
+5. Deploy the containerized application to a live AWS EC2 virtual
+   machine so it is accessible on the internet.
+
+6. Implement proper error handling on all API endpoints (404 for
+   not found, 400 for bad input, 500 for server errors) and log
+   every request with timestamp, method, path, and status code.
+
+Core Features
+-------------
+- Create a task with title, description, status, and due date
+- View all tasks in a clean card-based list
+- Edit any task using the same form (pre-filled with current data)
+- Delete a task with a confirmation popup to prevent accidents
+- Filter tasks by status: All, Pending, In Progress, Completed
+- Color-coded status badges for quick visual identification
+- Responsive layout that works on both desktop and mobile
+
+
+----------------------------------------------------------------
+2. AWS SERVICES USED
+----------------------------------------------------------------
+
+Amazon EC2 (Elastic Compute Cloud)
+-----------------------------------
+EC2 is Amazon's virtual machine service. It allows you to rent a
+server in the cloud and run any software on it, just like a
+physical computer but hosted in an Amazon data center.
+
+What we used:
+
+  Instance Type: t2.micro
+    This is the size of the virtual machine. t2.micro comes with
+    1 virtual CPU and 1 GB of RAM. It is part of the AWS Free Tier,
+    meaning it can run for 750 hours per month at no cost for the
+    first 12 months of an AWS account.
+
+  AMI (Amazon Machine Image): Ubuntu 24.04 LTS
+    An AMI is a pre-configured operating system template used to
+    launch an EC2 instance. We chose Ubuntu 24.04 LTS because it
+    is a stable, widely used Linux distribution with excellent
+    support for Docker and has a large community for troubleshooting.
+    LTS stands for Long Term Support, meaning it receives security
+    updates for 5 years.
+
+  Public IPv4 Address: 16.171.8.141
+    This is the public internet address of the EC2 server. Anyone
+    who types http://16.171.8.141 in their browser is sending a
+    request to this server. AWS assigns this address automatically
+    when the instance is launched.
+
+  Region: eu-north-1 (Stockholm, Sweden)
+    AWS has data centers around the world called regions. The server
+    is hosted in the Stockholm region, which provides low latency
+    for users in Europe.
+
+Security Group (EC2 Firewall)
+------------------------------
+A Security Group acts as a virtual firewall for the EC2 instance.
+It controls which network traffic is allowed to reach the server
+based on port numbers and IP addresses.
+
+For this project, the following inbound rules were configured:
+
+  Port 22 (SSH)   - Open to allow remote terminal access to the
+                    server for administration and deployment.
+
+  Port 80 (HTTP)  - Open to allow web browser traffic to reach
+                    the application from any IP address on the
+                    internet.
+
+  All other ports are closed by default for security.
+
+Note: Port 5000 (Flask's default port) could not be opened due
+to network restrictions, so the Docker container was configured
+to map port 80 on the host to port 5000 inside the container.
+This means the app listens on 5000 internally but is accessed
+through port 80 from the outside.
+
+Key Pair Authentication
+------------------------
+AWS uses RSA key pairs for SSH authentication instead of passwords.
+When the EC2 instance was created, a key pair called
+"task-manager-key" was generated. AWS stores the public key on the
+server. The private key was downloaded as a .pem file and stored
+locally. When connecting via SSH, the private key proves identity
+without needing a password.
+
+Other AWS Services (Not Used)
+------------------------------
+For a production-scale application, the following AWS services
+would typically be added:
+
+  Amazon RDS - A managed relational database service that would
+  replace the SQLite file with a more powerful database like
+  PostgreSQL or MySQL.
+
+  Amazon S3 - Object storage for hosting static files, backups,
+  or user-uploaded content.
+
+  Amazon Route 53 - DNS service for pointing a domain name
+  (like taskmanager.com) to the EC2 instance instead of using
+  a raw IP address.
+
+  Elastic Load Balancer - Distributes incoming traffic across
+  multiple EC2 instances for high availability.
+
+For this project, all components (web server, application, and
+database) run together on a single t2.micro EC2 instance, which
+is appropriate for a demonstration or student project.
+
+
+----------------------------------------------------------------
+3. DEPLOYMENT STEPS
+----------------------------------------------------------------
+
+Overview
+--------
+The deployment process takes a project that works locally on a
+Windows machine and makes it run on a Linux server in the cloud,
+accessible from any browser in the world.
+
+Step 1 - Launch the EC2 Instance
+----------------------------------
+  1. Log in to the AWS Management Console at aws.amazon.com
+  2. Navigate to EC2 and click "Launch Instance"
+  3. Set the name to "task-manager"
+  4. Select Ubuntu 24.04 LTS as the operating system
+  5. Choose t2.micro as the instance type (free tier eligible)
+  6. Create a new key pair named "task-manager-key" in RSA format
+     and download the .pem file - this file is used to connect
+     to the server via SSH
+  7. In the firewall settings, enable "Allow HTTP traffic from
+     the internet" to open port 80
+  8. Click "Launch Instance" and wait for the state to show "Running"
+  9. Note the Public IPv4 address shown in the instance details
+
+Step 2 - Fix SSH Key Permissions on Windows
+--------------------------------------------
+  Windows gives too many users access to files by default. SSH
+  security requires that private key files are readable ONLY by
+  the owner. If permissions are too open, SSH refuses to use the
+  key and shows a "bad permissions" error.
+
+  Open PowerShell as Administrator and run:
+
+    $keyPath = "C:\Users\ragna\Downloads\task-manager-key.pem"
+    takeown /F $keyPath
+    icacls $keyPath /reset
+    icacls $keyPath /inheritance:r
+    icacls $keyPath /remove "BUILTIN\Administrators"
+    icacls $keyPath /remove "NT AUTHORITY\SYSTEM"
+    icacls $keyPath /remove "BUILTIN\Users"
+    icacls $keyPath /remove "Everyone"
+    icacls $keyPath /grant:r "$($env:USERNAME):(R)"
+
+  What each command does:
+    takeown     - Takes ownership of the file as the current user
+    icacls /reset - Removes all existing permission entries
+    /inheritance:r - Removes inherited permissions from parent folder
+    /remove     - Removes specific users from the permission list
+    /grant:r    - Grants read-only access to the current user only
+
+Step 3 - Connect to the Server via SSH
+----------------------------------------
+  SSH (Secure Shell) is a protocol that opens an encrypted
+  terminal session to a remote server. All commands typed in
+  the terminal are executed on the EC2 server.
+
+  Run in PowerShell:
+    ssh -i "C:\Users\ragna\Downloads\task-manager-key.pem" ubuntu@16.171.8.141
+
+  Explanation of the command:
+    ssh              - The SSH client program
+    -i               - Specifies the identity file (private key)
+    "...key.pem"     - Path to the private key file
+    ubuntu           - The default username on Ubuntu EC2 instances
+    @16.171.8.141    - The public IP address of the EC2 server
+
+  When connected successfully, the terminal prompt changes to:
+    ubuntu@ip-172-31-40-218:~$
+  This means all commands are now running on the EC2 server.
+
+Step 4 - Install Docker on the EC2 Server
+-------------------------------------------
+  Docker is not installed on the Ubuntu server by default.
+  These commands install Docker and Docker Compose:
+
+    sudo apt update && sudo apt upgrade -y
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo usermod -aG docker ubuntu
+    sudo apt install docker-compose-plugin -y
+    exit
+
+  What each command does:
+    sudo apt update       - Downloads the latest package list from
+                            Ubuntu's software repositories
+    sudo apt upgrade -y   - Installs all available system updates
+    curl ... | sudo sh    - Downloads Docker's official installation
+                            script and runs it with root privileges
+    usermod -aG docker    - Adds the ubuntu user to the docker group
+                            so Docker commands can run without sudo
+    apt install docker-compose-plugin - Installs Docker Compose as
+                            a Docker plugin
+    exit                  - Logs out so the group change takes effect
+
+  After logging back in, verify the installation:
+    docker --version
+    docker compose version
+
+Step 5 - Upload Project Files from Windows to EC2
+---------------------------------------------------
+  SCP (Secure Copy Protocol) transfers files over an SSH connection.
+  Run this in a NEW PowerShell window (not the SSH session):
+
+    scp -i "C:\Users\ragna\Downloads\task-manager-key.pem" -r "C:\Users\ragna\Desktop\task_management" ubuntu@16.171.8.141:~/task_management
+
+  Explanation:
+    scp              - Secure copy program
+    -i "...key.pem"  - The private key for authentication
+    -r               - Recursive flag: copies entire folder and
+                       all its contents
+    "C:\Users\..."   - Source path on the Windows machine
+    ubuntu@...       - Destination user and server
+    :~/task_management - Destination path on the server
+                       (~ means the home directory /home/ubuntu)
+
+Step 6 - Change Port from 5000 to 80
+--------------------------------------
+  Port 5000 was blocked by network restrictions so it could not
+  be opened in the Security Group. The solution is to map port 80
+  (which is already open for HTTP) on the host machine to port 5000
+  inside the Docker container.
+
+  On the EC2 server, run:
+    cd ~/task_management
+    sed -i 's/"${FLASK_PORT:-5000}:5000"/"80:5000"/' docker-compose.yml
+
+  What this does:
+    cd ~/task_management  - Navigate into the project folder
+    sed -i                - Edit the file in place (modify directly)
+    's/old/new/'          - Replace the old port mapping with new one
+    "80:5000"             - Host port 80 maps to container port 5000
+
+  Result: When a browser sends a request to port 80, Docker
+  receives it and forwards it to Flask running on port 5000
+  inside the container.
+
+Step 7 - Build and Start the Application
+------------------------------------------
+  On the EC2 server:
+    docker compose up --build -d
+
+  Explanation:
+    docker compose up   - Starts all services defined in
+                          docker-compose.yml
+    --build             - Forces a rebuild of the Docker image
+                          from the Dockerfile before starting
+    -d                  - Detached mode: runs in the background
+                          so the terminal remains usable
+
+  What happens during the build:
+    1. Docker reads the Dockerfile
+    2. Downloads the python:3.11-slim base image from Docker Hub
+    3. Installs all packages listed in requirements.txt
+    4. Copies the project files into the image
+    5. Starts the container and runs "python app.py"
+    6. Flask starts, creates the database tables, and begins
+       listening for requests on port 5000 inside the container
+    7. Docker maps port 80 on the host to port 5000 in the container
+
+Step 8 - Verify the Deployment
+--------------------------------
+  Check that the container is running:
+    docker compose ps
+
+  View application logs:
+    docker compose logs
+
+  The logs show every HTTP request in real time, for example:
+    INFO GET / 200 2ms
+    INFO GET /api/tasks 200 1ms
+
+  If the logs show "Running on http://0.0.0.0:5000" the app
+  is running correctly.
+
+Step 9 - Access the Application
+---------------------------------
+  Open a web browser on any device and navigate to:
+    http://16.171.8.141
+
+  The Task Management System loads and is fully functional.
+  Data entered through the browser is saved to the SQLite database
+  stored in a Docker volume on the EC2 server and persists across
+  container restarts.
+
+Keeping the App Running After Server Reboot
+--------------------------------------------
+  The docker-compose.yml file contains:
+    restart: unless-stopped
+
+  This tells Docker to automatically restart the container if it
+  crashes or if the EC2 server is rebooted, unless the container
+  was manually stopped with "docker compose down".
+
+  Docker itself is set to start automatically on boot:
+    sudo systemctl enable docker
+
+
+================================================================
+                        END OF REPORT
+================================================================
